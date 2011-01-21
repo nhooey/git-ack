@@ -1,0 +1,119 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use Data::Dumper;
+use Term::ANSIColor;
+
+my %argv = (
+	group => 1,
+	color => 1,
+	pager => qx{git config -z --get ack.pager},
+);
+my $result = GetOptions(
+	'all:s'         => \$argv{all},
+	'branches:s'    => \$argv{branches},
+	'remotes:s'     => \$argv{remotes},
+	'group!'        => \$argv{group},
+	'color|colour!' => \$argv{color},
+	'pager=s'       => \$argv{pager},
+);
+
+if ($argv{pager} && $argv{pager} ne 'none') {
+	$SIG{PIPE} = 'IGNORE';
+	open STDOUT, "| $argv{pager}" or die "can't open pager: `$argv{pager}'";
+}
+
+my %p_refs;
+for my $key (qw(all branches remotes)) {
+	if (defined $argv{$key} && $argv{$key} eq '') {
+		# Enable the option if the optional string wasn't specified
+		$argv{$key} = 1;
+	}
+	if (exists $argv{$key} && $argv{$key} && $argv{$key} != 1) {
+		# Set the pattern if it was specified
+		$p_refs{$key} = $argv{$key};
+	}
+}
+
+my @patterns = @ARGV;
+
+my %colors = (
+	header => 'blue',
+	commit => 'yellow',
+	file   => 'white',
+);
+
+sub printc {
+	my ($color, @args) = @_;
+	return print c($color, @args);
+}
+
+sub c {
+	my ($color, @args) = @_;
+	if ($argv{color}) {
+		return sprintf("%s%s%s", color($color), join('', @args), color('reset'));
+	} else {
+		return join('', @args);
+	}
+}
+
+my %refs;
+
+sub set_if_match {
+	my ($key, $ref) = @_;
+	if (exists $p_refs{$key} && $p_refs{$key}) {
+		$refs{$ref} = 1 if /$p_refs{$key}/;
+	} else {
+		$refs{$_} = 1;
+	}
+}
+
+if ($argv{all}) {
+	map { s/^\w+ //; set_if_match('all', $_); } split("\n", qx{git show-ref});
+} else {
+	map { s/^..//; set_if_match('branches', $_); } split("\n", qx{git branch})
+		if $argv{branches};
+	map { s/^..//; set_if_match('remotes', $_); } split("\n", qx{git branch -r})
+		if $argv{remotes};
+	map { s/^..//;   $refs{$_} = 1; } grep { /^\* / } split("\n", qx{git branch})
+		unless $argv{branches} || $argv{remotes};
+}
+
+my $newline = 0;
+for my $ref (sort keys %refs) {
+	# Extract file => commit_substring
+	my %files = map {
+		my ($commit, $file) = ($_ =~ /^\w+\s+\w+\s+(\w{8})\w*\s+(.+)/);
+		$file => $commit;
+	} split("\n", qx{git ls-tree -r $ref});
+
+	# Select files based on patterns, using 'OR'
+	my %selected;
+	for my $p (@patterns) {
+		map {
+			my $commit = $files{$_};
+			delete $files{$_};
+			$selected{$_} = $commit;
+		} grep { /$p/ } keys %files;
+	}
+
+	# Print results
+	my $header  = $argv{group} ? 1 : 0;
+	for my $file (sort keys %selected) {
+		print "\n" if $newline && $header > 0;
+		printc($colors{header}, "$ref\n") if $header-- > 0;
+		my $commit = $selected{$file};
+		my $line = c($colors{commit}, $commit) . ' ' . c($colors{file}, $file) . "\n";
+		if ($argv{group}) {
+			print $line;
+		} else {
+			print c($colors{header}, $ref) . ":" . $line;
+		}
+	}
+	$newline = 1 if $argv{group};
+}
+
+#close STDOUT;
